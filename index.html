@@ -50,10 +50,12 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 18px;
-    padding: 24px;
+    padding: 48px 24px 32px;
     text-align: center;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   #loadScreen h1 { font-size: 20px; margin: 0; }
   #loadScreen p { font-size: 13px; color: #888; margin: 0; max-width: 300px; line-height: 1.5; }
@@ -70,6 +72,31 @@
   .bigBtn:active { transform: scale(0.96); }
   #fileInput { display: none; }
   #loadError { color: #c94f4f; font-size: 12px; max-width: 300px; }
+
+  /* ---------- History ---------- */
+  #historySection { width: 100%; max-width: 420px; text-align: left; margin-top: 10px; }
+  #historySection h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #777; margin: 0 0 10px; font-weight: 600; }
+  .histItem { background: #0d0d0d; border: 1px solid #262626; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; -webkit-tap-highlight-color: transparent; cursor: pointer; }
+  .histItem:active { background: #171717; }
+  .histTop { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .histName { font-size: 14px; color: #e8ddc9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .histDel { background: none; border: none; color: #666; font-size: 20px; line-height: 1; padding: 0 4px; -webkit-tap-highlight-color: transparent; }
+  .histMeta { font-size: 11px; color: #777; margin: 4px 0 9px; }
+  .histBar { height: 5px; background: #222; border-radius: 999px; overflow: hidden; }
+  .histFill { height: 100%; background: #e8a33d; border-radius: 999px; }
+  .histPct { font-size: 11px; color: #aaa; margin-top: 6px; display: flex; justify-content: space-between; }
+  .histBadge { color: #6fae6f; }
+
+  #toast {
+    position: fixed; left: 50%;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    background: #222; color: #eee; font-size: 12px;
+    padding: 9px 16px; border-radius: 999px;
+    z-index: 100; opacity: 0; transition: opacity 0.25s;
+    pointer-events: none; max-width: 85%; text-align: center;
+  }
+  #toast.show { opacity: 1; }
 
   /* ---------- Player screen ---------- */
   #playerScreen { height: 100%; display: none; flex-direction: column; position: relative; }
@@ -171,6 +198,7 @@
 <body>
 
 <div id="app" class="layout-auto">
+  <div id="toast"></div>
 
   <!-- LOAD SCREEN -->
   <div id="loadScreen">
@@ -179,6 +207,10 @@
     <input type="file" id="fileInput">
     <button class="bigBtn" id="chooseFileBtn">Choose file (.srt or .json)</button>
     <p id="loadError" style="display:none;"></p>
+    <div id="historySection" style="display:none;">
+      <h2>Continue watching</h2>
+      <div id="historyList"></div>
+    </div>
   </div>
 
   <!-- PLAYER SCREEN -->
@@ -284,7 +316,9 @@
     dim: 0,
     fontSize: 26,
     bilingual: true,
-    layout: "auto"
+    layout: "auto",
+    currentId: null,     // id of the movie currently loaded in memory
+    meta: null           // its history record (position, duration, ...)
   };
 
   // ---------- settings persistence (localStorage is fine here: per-device convenience only) ----------
@@ -335,89 +369,310 @@
     return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) / 1000;
   }
 
-  // ---------- File loading: accepts .srt (plain) or .json (bundle with subtitles+translations) ----------
-  function loadFileContent(text, name) {
-    var errEl = document.getElementById("loadError");
-    errEl.style.display = "none";
+  // ---------- IndexedDB: play history ----------
+  // "meta" = small record updated often (position, duration, last opened)
+  // "content" = the subtitles/translations, written once per movie
+  var dbPromise = null;
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error("IndexedDB unavailable")); return; }
+      var req = indexedDB.open("subtitlePlayerDB", 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "id" });
+        if (!db.objectStoreNames.contains("content")) db.createObjectStore("content", { keyPath: "id" });
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+    return dbPromise;
+  }
+  function idbRun(storeName, mode, fn) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(storeName, mode);
+        var req = fn(tx.objectStore(storeName));
+        tx.oncomplete = function () { resolve(req ? req.result : undefined); };
+        tx.onerror = function () { reject(tx.error); };
+        tx.onabort = function () { reject(tx.error); };
+      });
+    });
+  }
+  function idbPut(store, value) { return idbRun(store, "readwrite", function (s) { return s.put(value); }); }
+  function idbGet(store, key) { return idbRun(store, "readonly", function (s) { return s.get(key); }); }
+  function idbGetAll(store) { return idbRun(store, "readonly", function (s) { return s.getAll(); }); }
+  function idbDelete(store, key) { return idbRun(store, "readwrite", function (s) { return s.delete(key); }); }
 
+  // ---------- Small helpers ----------
+  var toastTimer = null;
+  function showToast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove("show"); }, 3500);
+  }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function fmtHMS(t) {
+    var s = Math.max(0, Math.floor(t));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h > 0 ? h + ":" + pad2(m) + ":" + pad2(sec) : m + ":" + pad2(sec);
+  }
+  function makeId(name, count, lang) { return name + "|" + count + "|" + (lang || ""); }
+
+  // ---------- Progress saving ----------
+  function currentPos() {
+    return state.running ? (Date.now() - state.startTs) / 1000 + state.offset : state.now;
+  }
+  function saveProgress() {
+    var m = state.meta;
+    if (!m) return;
+    m.position = currentPos();
+    m.wasRunning = state.running;
+    m.savedAt = Date.now();
+    m.lastOpened = m.savedAt;
+    idbPut("meta", m).catch(function () { /* history unavailable (e.g. private mode) — playback still works */ });
+  }
+
+  // ---------- File loading: accepts .srt (plain) or .json (bundle with subtitles+translations) ----------
+  function showLoadError(msg) {
+    var errEl = document.getElementById("loadError");
+    errEl.textContent = msg;
+    errEl.style.display = "block";
+  }
+  function loadFileContent(text, name) {
+    document.getElementById("loadError").style.display = "none";
     var trimmed = text.trim();
+    var data;
     if (trimmed.charAt(0) === "{") {
-      // JSON bundle
       try {
-        var data = JSON.parse(trimmed);
-        if (!data.subtitles || !Array.isArray(data.subtitles)) throw new Error("no subtitles array");
-        state.subtitles = data.subtitles;
-        state.translations = data.translations || {};
-        state.hasTranslations = Object.keys(state.translations).length > 0;
-        state.fileName = data.name || name;
+        var j = JSON.parse(trimmed);
+        if (!j.subtitles || !Array.isArray(j.subtitles) || j.subtitles.length === 0) throw new Error("no subtitles");
+        data = { subtitles: j.subtitles, translations: j.translations || {}, name: j.name || name, lang: j.lang || "" };
       } catch (e) {
-        errEl.textContent = "That JSON file doesn't look like a valid captions bundle.";
-        errEl.style.display = "block";
+        showLoadError("That JSON file doesn't look like a valid captions bundle.");
         return;
       }
     } else {
-      // Treat as SRT
       var subs = parseSRT(text);
       if (subs.length === 0) {
-        errEl.textContent = "Couldn't find any valid subtitle entries in that file.";
-        errEl.style.display = "block";
+        showLoadError("Couldn't find any valid subtitle entries in that file.");
         return;
       }
-      state.subtitles = subs;
-      state.translations = {};
-      state.hasTranslations = false;
-      state.fileName = name;
+      data = { subtitles: subs, translations: {}, name: name, lang: "" };
     }
-
-    if (!state.hasTranslations) state.bilingual = false;
-    openPlayer();
+    startSession(data);
   }
 
-  // ---------- Player open/reset ----------
+  // Leave whatever is currently loaded in a clean, saved state before switching movies.
+  function parkCurrent() {
+    if (state.meta) { stopClock(); saveProgress(); }
+  }
+
+  function startSession(data) {
+    var id = makeId(data.name, data.subtitles.length, data.lang);
+    // Same movie already in memory (e.g. accidental Back, then re-picked file): just return to it.
+    if (state.currentId === id && state.subtitles.length) { openPlayer(); return Promise.resolve(); }
+
+    parkCurrent();
+    var duration = data.subtitles[data.subtitles.length - 1].end;
+    return idbGet("meta", id).catch(function () { return null; }).then(function (existing) {
+      var meta = existing || {
+        id: id, name: data.name, lang: data.lang || "", count: data.subtitles.length,
+        duration: duration, position: 0, wasRunning: false, savedAt: Date.now(), lastOpened: Date.now()
+      };
+      meta.lastOpened = Date.now();
+      state.subtitles = data.subtitles;
+      state.translations = data.translations || {};
+      state.hasTranslations = Object.keys(state.translations).length > 0;
+      state.fileName = data.name;
+      state.currentId = id;
+      state.meta = meta;
+      return idbPut("content", { id: id, subtitles: data.subtitles, translations: state.translations })
+        .catch(function () {})
+        .then(function () { return idbPut("meta", meta).catch(function () {}); });
+    }).then(function () {
+      resumeFromMeta();
+      openPlayer();
+    });
+  }
+
+  function openFromHistory(id) {
+    if (state.currentId === id && state.subtitles.length) { openPlayer(); return; }
+    parkCurrent();
+    Promise.all([idbGet("meta", id), idbGet("content", id)]).then(function (r) {
+      var meta = r[0], content = r[1];
+      if (!meta || !content) throw new Error("missing");
+      state.subtitles = content.subtitles;
+      state.translations = content.translations || {};
+      state.hasTranslations = Object.keys(state.translations).length > 0;
+      state.fileName = meta.name;
+      state.currentId = id;
+      state.meta = meta;
+      resumeFromMeta();
+      openPlayer();
+    }).catch(function () {
+      showToast("Couldn't open that entry — try loading the file again.");
+      renderHistory();
+    });
+  }
+
+  // Restore the saved position. If the clock was running when the app last saved (e.g. iOS closed the
+  // app mid-movie), catch up by the time that has passed — but only for a short gap, so reopening a
+  // movie hours later never jumps somewhere surprising.
+  function resumeFromMeta() {
+    var m = state.meta;
+    var pos = m.position || 0;
+    var catchUp = 0;
+    if (m.wasRunning && m.savedAt) {
+      var gap = (Date.now() - m.savedAt) / 1000;
+      if (gap > 0 && gap <= 600) catchUp = gap;
+    }
+    pos += catchUp;
+    state.running = false;
+    state.offset = pos;
+    state.now = pos;
+    if (catchUp > 0) {
+      startClock();
+      showToast("Resumed at " + fmtHMS(pos) + " (caught up " + Math.round(catchUp) + "s)");
+    } else if (pos > 1) {
+      showToast("Resumed at " + fmtHMS(pos) + " — paused");
+    }
+    updatePlayPauseIcon();
+  }
+
+  // ---------- Player open / home ----------
   function openPlayer() {
     document.getElementById("loadScreen").style.display = "none";
     document.getElementById("playerScreen").classList.add("active");
     document.getElementById("fileLabel").textContent = state.fileName;
-    document.getElementById("bilingualSwitch").classList.toggle("on", state.bilingual);
-    if (!state.hasTranslations) {
-      document.getElementById("bilingualSwitch").style.opacity = "0.3";
-      document.getElementById("bilingualSwitch").disabled = true;
-    } else {
-      document.getElementById("bilingualSwitch").style.opacity = "1";
-      document.getElementById("bilingualSwitch").disabled = false;
-    }
-    resetClock();
+    var sw = document.getElementById("bilingualSwitch");
+    sw.classList.toggle("on", state.bilingual && state.hasTranslations);
+    sw.style.opacity = state.hasTranslations ? "1" : "0.3";
+    sw.disabled = !state.hasTranslations;
     applySettingsToUI();
+    updatePlayPauseIcon();
     render();
   }
 
-  function resetClock() {
-    state.running = false;
-    state.offset = 0;
-    state.now = 0;
-    updatePlayPauseIcon();
+  function showHome() {
+    saveProgress();   // clock keeps running in memory, so tapping the history entry returns with no drift
+    document.getElementById("playerScreen").classList.remove("active");
+    document.getElementById("loadScreen").style.display = "flex";
+    renderHistory();
+  }
+
+  // ---------- History list ----------
+  function renderHistory() {
+    idbGetAll("meta").catch(function () { return []; }).then(function (items) {
+      items = items || [];
+      var sec = document.getElementById("historySection");
+      var list = document.getElementById("historyList");
+      list.innerHTML = "";
+      if (items.length === 0) { sec.style.display = "none"; return; }
+      sec.style.display = "block";
+      items.sort(function (a, b) { return (b.lastOpened || 0) - (a.lastOpened || 0); });
+
+      items.forEach(function (m) {
+        var live = state.meta && state.meta.id === m.id;
+        var pos = live ? currentPos() : (m.position || 0);
+        var pct = m.duration > 0 ? Math.max(0, Math.min(100, Math.round(pos / m.duration * 100))) : 0;
+
+        var card = document.createElement("div");
+        card.className = "histItem";
+
+        var top = document.createElement("div");
+        top.className = "histTop";
+        var nameEl = document.createElement("div");
+        nameEl.className = "histName";
+        nameEl.textContent = m.name;
+        var del = document.createElement("button");
+        del.className = "histDel";
+        del.setAttribute("aria-label", "Remove from history");
+        del.textContent = "\u00D7";
+        del.addEventListener("click", function (e) {
+          e.stopPropagation();
+          removeFromHistory(m);
+        });
+        top.appendChild(nameEl);
+        top.appendChild(del);
+
+        var when = new Date(m.lastOpened || Date.now());
+        var whenStr = when.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ", " +
+                      when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        var meta = document.createElement("div");
+        meta.className = "histMeta";
+        meta.textContent = (m.lang ? m.lang : "Original only") + " \u00B7 " + m.count + " lines \u00B7 " + whenStr;
+
+        var bar = document.createElement("div");
+        bar.className = "histBar";
+        var fill = document.createElement("div");
+        fill.className = "histFill";
+        fill.style.width = pct + "%";
+        bar.appendChild(fill);
+
+        var pctRow = document.createElement("div");
+        pctRow.className = "histPct";
+        var left = document.createElement("span");
+        left.textContent = pct + "% \u00B7 " + fmtHMS(pos) + " of " + fmtHMS(m.duration || 0);
+        var right = document.createElement("span");
+        if (live && state.running) { right.className = "histBadge"; right.textContent = "Playing"; }
+        else if (pct >= 98) { right.textContent = "Finished"; }
+        else { right.textContent = "Tap to resume"; }
+        pctRow.appendChild(left);
+        pctRow.appendChild(right);
+
+        card.appendChild(top);
+        card.appendChild(meta);
+        card.appendChild(bar);
+        card.appendChild(pctRow);
+        card.addEventListener("click", function () { openFromHistory(m.id); });
+        list.appendChild(card);
+      });
+    });
+  }
+
+  function removeFromHistory(m) {
+    if (!confirm("Remove \"" + m.name + "\" from history?")) return;
+    if (state.currentId === m.id) {
+      stopClock();
+      state.currentId = null;
+      state.meta = null;
+      state.subtitles = [];
+      state.translations = {};
+    }
+    Promise.all([idbDelete("meta", m.id), idbDelete("content", m.id)])
+      .catch(function () {})
+      .then(renderHistory);
   }
 
   // ---------- Timer ----------
   var rafId = null;
   function tick() {
     if (state.running) {
-      var elapsed = (Date.now() - state.startTs) / 1000;
-      state.now = elapsed + state.offset;
+      state.now = (Date.now() - state.startTs) / 1000 + state.offset;
       render();
       rafId = requestAnimationFrame(tick);
     }
   }
-  function togglePlay() {
+  function startClock() {
+    state.startTs = Date.now();
+    state.running = true;
+    rafId = requestAnimationFrame(tick);
+    updatePlayPauseIcon();
+  }
+  function stopClock() {
     if (state.running) {
-      state.offset = state.now;
+      state.offset = currentPos();
+      state.now = state.offset;
       state.running = false;
-    } else {
-      state.startTs = Date.now();
-      state.running = true;
-      rafId = requestAnimationFrame(tick);
     }
     updatePlayPauseIcon();
+  }
+  function togglePlay() {
+    if (state.running) stopClock(); else startClock();
+    saveProgress();
   }
   function updatePlayPauseIcon() {
     document.getElementById("playIcon").style.display = state.running ? "none" : "block";
@@ -425,23 +680,31 @@
   }
   function nudge(delta) {
     if (state.running) {
-      state.offset = state.now + delta;
+      state.offset = currentPos() + delta;
       state.startTs = Date.now();
+      state.now = state.offset;
     } else {
       state.offset += delta;
       state.now += delta;
     }
+    if (state.now < 0) { state.now = 0; state.offset = 0; }
     render();
+    saveProgress();
   }
   function syncTo(t) {
-    if (state.running) {
-      state.offset = t;
-      state.startTs = Date.now();
-    } else {
-      state.offset = t;
-      state.now = t;
-    }
+    state.offset = t;
+    state.now = t;
+    if (state.running) state.startTs = Date.now();
     render();
+    saveProgress();
+  }
+  function resetClock() {
+    state.running = false;
+    state.offset = 0;
+    state.now = 0;
+    updatePlayPauseIcon();
+    render();
+    saveProgress();
   }
 
   // ---------- Render ----------
@@ -466,7 +729,7 @@
 
   function lineText(i) {
     if (i < 0 || i >= state.subtitles.length) return "";
-    if (state.bilingual) return state.subtitles[i].text;
+    if (state.bilingual && state.hasTranslations) return state.subtitles[i].text;
     var t = state.translations[i];
     return (t !== undefined && t !== null && t !== "") ? t : state.subtitles[i].text;
   }
@@ -519,7 +782,7 @@
     document.getElementById("dimOverlay").style.opacity = state.dim / 100;
     document.getElementById("dimLabel").textContent = "Dim overlay: " + state.dim + "%";
     document.getElementById("sizeLabel").textContent = "Text size: " + state.fontSize + "px";
-    document.getElementById("bilingualSwitch").classList.toggle("on", state.bilingual);
+    document.getElementById("bilingualSwitch").classList.toggle("on", state.bilingual && state.hasTranslations);
 
     var swatches = document.querySelectorAll(".swatch");
     swatches.forEach(function (sw) {
@@ -584,7 +847,10 @@
       var file = e.target.files && e.target.files[0];
       if (!file) return;
       var reader = new FileReader();
-      reader.onload = function (ev) { loadFileContent(String(ev.target.result), file.name); };
+      reader.onload = function (ev) {
+        document.getElementById("fileInput").value = "";   // lets the same file be picked again later
+        loadFileContent(String(ev.target.result), file.name);
+      };
       reader.onerror = function () {
         var errEl = document.getElementById("loadError");
         errEl.textContent = "Couldn't read that file. Try again.";
@@ -593,14 +859,8 @@
       reader.readAsText(file);
     });
 
-    document.getElementById("backBtn").addEventListener("click", function () {
-      document.getElementById("playerScreen").classList.remove("active");
-      document.getElementById("loadScreen").style.display = "flex";
-    });
-    document.getElementById("newFileBtn").addEventListener("click", function () {
-      document.getElementById("playerScreen").classList.remove("active");
-      document.getElementById("loadScreen").style.display = "flex";
-    });
+    document.getElementById("backBtn").addEventListener("click", showHome);
+    document.getElementById("newFileBtn").addEventListener("click", showHome);
 
     document.getElementById("settingsBtn").addEventListener("click", function () {
       document.getElementById("settingsPanel").classList.toggle("open");
@@ -644,6 +904,15 @@
     document.getElementById("fwd1").addEventListener("click", function () { nudge(1); });
     document.getElementById("fwd10").addEventListener("click", function () { nudge(10); });
     document.getElementById("resetBtn").addEventListener("click", resetClock);
+
+    renderHistory();
+    // Save position regularly while playing, and whenever the app is hidden/closed.
+    setInterval(function () { if (state.running) saveProgress(); }, 5000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") saveProgress();
+      else if (state.running) render();
+    });
+    window.addEventListener("pagehide", saveProgress);
 
     document.getElementById("sizeSlider").value = state.fontSize;
     document.getElementById("dimSlider").value = state.dim;
