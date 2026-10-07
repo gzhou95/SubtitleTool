@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Subtitle Player</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Subtitles">
+<meta name="theme-color" content="#000000">
+<style>
+  :root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100%;
+    background: #000;
+    color: #e8ddc9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #app {
+    height: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  #app.force-landscape {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vh;
+    height: 100vw;
+    transform-origin: top left;
+    transform: rotate(90deg) translateY(-100%);
+  }
+
+  /* ---------- Load screen ---------- */
+  #loadScreen {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 24px;
+    text-align: center;
+  }
+  #loadScreen h1 { font-size: 20px; margin: 0; }
+  #loadScreen p { font-size: 13px; color: #888; margin: 0; max-width: 300px; line-height: 1.5; }
+  .bigBtn {
+    background: #fff;
+    color: #000;
+    border: none;
+    border-radius: 10px;
+    padding: 14px 28px;
+    font-size: 15px;
+    font-weight: 600;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .bigBtn:active { transform: scale(0.96); }
+  #fileInput { display: none; }
+  #loadError { color: #c94f4f; font-size: 12px; max-width: 300px; }
+
+  /* ---------- Player screen ---------- */
+  #playerScreen { height: 100%; display: none; flex-direction: column; position: relative; }
+  #playerScreen.active { display: flex; }
+
+  #dimOverlay {
+    position: absolute; inset: 0;
+    background: #000;
+    pointer-events: none;
+    opacity: 0;
+    z-index: 30;
+  }
+
+  #topBar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px 8px;
+    position: relative; z-index: 20;
+    flex-shrink: 0;
+  }
+  #topBar button {
+    background: none; border: none; color: #999;
+    font-size: 20px; padding: 6px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #fileLabel { font-size: 11px; color: #777; max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #settingsPanel {
+    display: none;
+    margin: 0 16px 10px;
+    background: #0d0d0d;
+    border: 1px solid #262626;
+    border-radius: 12px;
+    padding: 14px;
+    z-index: 20;
+    position: relative;
+  }
+  #settingsPanel.open { display: block; }
+  #settingsPanel .row { margin-bottom: 14px; }
+  #settingsPanel .row:last-child { margin-bottom: 0; }
+  #settingsPanel label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: #777; display: block; margin-bottom: 6px; }
+  #settingsPanel input[type="range"] { width: 100%; }
+  .swatches { display: flex; gap: 10px; }
+  .swatch { width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; -webkit-tap-highlight-color: transparent; }
+  .swatch.active { border-color: #fff; }
+  .toggleRow { display: flex; justify-content: space-between; align-items: center; }
+  .segBtns { display: flex; gap: 6px; }
+  .segBtn { flex: 1; background: #1a1a1a; border: 1px solid #333; color: #aaa; border-radius: 8px; padding: 8px 4px; font-size: 11px; -webkit-tap-highlight-color: transparent; }
+  .segBtn.active { background: #fff; color: #000; border-color: #fff; }
+  .switch { width: 42px; height: 24px; border-radius: 999px; background: #333; position: relative; border: none; -webkit-tap-highlight-color: transparent; }
+  .switch.on { background: #fff; }
+  .switch .knob { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #000; transition: left 0.15s; }
+  .switch.on .knob { left: 20px; background: #000; }
+
+  #captionArea {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 18px;
+    padding: 10px 20px;
+    overflow: hidden;
+    z-index: 10;
+    position: relative;
+  }
+  .capLine { text-align: center; line-height: 1.4; opacity: 0.3; transition: opacity 0.15s; word-break: break-word; }
+  .capCurrentWrap { display: flex; flex-direction: column; gap: 6px; align-items: center; -webkit-tap-highlight-color: transparent; }
+  .capOrig { opacity: 0.55; }
+  .capMain { opacity: 1; font-weight: 600; }
+  #noCaption { color: #555; font-size: 13px; }
+
+  #clockLabel { text-align: center; font-size: 11px; color: #555; padding: 4px 10px; z-index: 10; flex-shrink: 0; }
+
+  #controls {
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    padding: 6px 20px 10px;
+    z-index: 10; flex-shrink: 0;
+  }
+  .ctrlBtn { background: none; border: none; color: #ccc; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 9px; -webkit-tap-highlight-color: transparent; }
+  .ctrlBtn svg { width: 20px; height: 20px; }
+  #playBtn {
+    background: #fff; color: #000; border: none; border-radius: 50%;
+    width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #playBtn svg { width: 22px; height: 22px; }
+  #playBtn:active, .ctrlBtn:active { transform: scale(0.9); }
+
+  #bottomRow { display: flex; justify-content: center; gap: 18px; padding-bottom: 16px; z-index: 10; flex-shrink: 0; }
+  #bottomRow button { background: none; border: none; color: #666; font-size: 11px; -webkit-tap-highlight-color: transparent; }
+
+  /* Auto orientation: landscape gets bigger text room */
+  .layout-auto #captionArea { }
+  @media (orientation: landscape) {
+    .layout-auto .capMain { max-width: 80%; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app" class="layout-auto">
+
+  <!-- LOAD SCREEN -->
+  <div id="loadScreen">
+    <h1>Subtitle Player</h1>
+    <p>Load a caption file to begin. Works fully offline — nothing is sent anywhere once this page is open.</p>
+    <input type="file" id="fileInput">
+    <button class="bigBtn" id="chooseFileBtn">Choose file (.srt or .json)</button>
+    <p id="loadError" style="display:none;"></p>
+  </div>
+
+  <!-- PLAYER SCREEN -->
+  <div id="playerScreen">
+    <div id="dimOverlay"></div>
+
+    <div id="topBar">
+      <button id="backBtn" aria-label="Back">&#8592;</button>
+      <span id="fileLabel"></span>
+      <div style="display:flex; gap:8px;">
+        <button id="fullscreenBtn" aria-label="Fullscreen">&#9974;</button>
+        <button id="settingsBtn" aria-label="Settings">&#9881;</button>
+      </div>
+    </div>
+
+    <div id="settingsPanel">
+      <div class="row">
+        <label>Text color</label>
+        <div class="swatches" id="colorSwatches"></div>
+      </div>
+      <div class="row">
+        <label id="dimLabel">Dim overlay: 0%</label>
+        <input type="range" id="dimSlider" min="0" max="90" value="0">
+      </div>
+      <div class="row">
+        <label id="sizeLabel">Text size: 26px</label>
+        <input type="range" id="sizeSlider" min="16" max="44" value="26">
+      </div>
+      <div class="row">
+        <label>Layout</label>
+        <div class="segBtns">
+          <button class="segBtn active" data-layout="auto">Auto-rotate</button>
+          <button class="segBtn" data-layout="portrait">Portrait</button>
+          <button class="segBtn" data-layout="landscape">Landscape</button>
+        </div>
+      </div>
+      <div class="row toggleRow">
+        <label style="margin:0;">Show original + translation</label>
+        <button class="switch on" id="bilingualSwitch"><span class="knob"></span></button>
+      </div>
+    </div>
+
+    <div id="captionArea">
+      <div class="capLine" id="prevLine"></div>
+      <div class="capCurrentWrap" id="currentWrap">
+        <div class="capLine capOrig" id="curOrig"></div>
+        <div class="capLine capMain" id="curMain"></div>
+        <div id="noCaption" style="display:none;">No caption at this time</div>
+      </div>
+      <div class="capLine" id="nextLine"></div>
+    </div>
+
+    <div id="clockLabel">Clock: 0:00.0 &middot; tap the current line to sync</div>
+
+    <div id="controls">
+      <button class="ctrlBtn" id="back10">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="11 17 6 12 11 7"></polyline><polyline points="18 17 13 12 18 7"></polyline></svg>
+        10s
+      </button>
+      <button class="ctrlBtn" id="back1">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        1s
+      </button>
+      <button id="playBtn">
+        <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20"></polygon></svg>
+        <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+      </button>
+      <button class="ctrlBtn" id="fwd1">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        1s
+      </button>
+      <button class="ctrlBtn" id="fwd10">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 17 18 12 13 7"></polyline><polyline points="6 17 11 12 6 7"></polyline></svg>
+        10s
+      </button>
+    </div>
+
+    <div id="bottomRow">
+      <button id="resetBtn">&#8634; Reset clock</button>
+      <button id="newFileBtn">Load new file</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var COLORS = ["#e8a33d", "#c94f4f", "#e8ddc9", "#6fae6f", "#5fb8c9"];
+  var STORE_KEY = "subtitlePlayerSettings";
+
+  var state = {
+    subtitles: [],       // [{start, end, text}]
+    translations: {},    // index -> string, may be empty
+    hasTranslations: false,
+    fileName: "",
+    running: false,
+    startTs: null,
+    offset: 0,
+    now: 0,
+    textColor: COLORS[0],
+    dim: 0,
+    fontSize: 26,
+    bilingual: true,
+    layout: "auto"
+  };
+
+  // ---------- settings persistence (localStorage is fine here: per-device convenience only) ----------
+  function loadSettings() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      var s = JSON.parse(raw);
+      if (s.textColor) state.textColor = s.textColor;
+      if (typeof s.dim === "number") state.dim = s.dim;
+      if (typeof s.fontSize === "number") state.fontSize = s.fontSize;
+      if (typeof s.bilingual === "boolean") state.bilingual = s.bilingual;
+      if (s.layout) state.layout = s.layout;
+    } catch (e) { /* ignore corrupt storage */ }
+  }
+  function saveSettings() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        textColor: state.textColor, dim: state.dim, fontSize: state.fontSize,
+        bilingual: state.bilingual, layout: state.layout
+      }));
+    } catch (e) { /* storage may be unavailable (private browsing) — fine, just not persisted */ }
+  }
+
+  // ---------- SRT parsing ----------
+  function parseSRT(text) {
+    var blocks = text.replace(/\r/g, "").trim().split(/\n\s*\n/);
+    var subs = [];
+    for (var i = 0; i < blocks.length; i++) {
+      var lines = blocks[i].split("\n").filter(Boolean);
+      if (lines.length < 2) continue;
+      var timeLineIdx = -1;
+      for (var j = 0; j < lines.length; j++) { if (lines[j].indexOf("-->") !== -1) { timeLineIdx = j; break; } }
+      if (timeLineIdx === -1) continue;
+      var parts = lines[timeLineIdx].split("-->");
+      var start = toSeconds(parts[0].trim());
+      var end = toSeconds(parts[1].trim());
+      var textLines = lines.slice(timeLineIdx + 1);
+      var txt = textLines.join(" ").replace(/<[^>]+>/g, "").trim();
+      if (txt) subs.push({ start: start, end: end, text: txt });
+    }
+    subs.sort(function (a, b) { return a.start - b.start; });
+    return subs;
+  }
+  function toSeconds(t) {
+    var m = t.match(/(\d+):(\d+):(\d+)[,.](\d+)/);
+    if (!m) return 0;
+    return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) / 1000;
+  }
+
+  // ---------- File loading: accepts .srt (plain) or .json (bundle with subtitles+translations) ----------
+  function loadFileContent(text, name) {
+    var errEl = document.getElementById("loadError");
+    errEl.style.display = "none";
+
+    var trimmed = text.trim();
+    if (trimmed.charAt(0) === "{") {
+      // JSON bundle
+      try {
+        var data = JSON.parse(trimmed);
+        if (!data.subtitles || !Array.isArray(data.subtitles)) throw new Error("no subtitles array");
+        state.subtitles = data.subtitles;
+        state.translations = data.translations || {};
+        state.hasTranslations = Object.keys(state.translations).length > 0;
+        state.fileName = data.name || name;
+      } catch (e) {
+        errEl.textContent = "That JSON file doesn't look like a valid captions bundle.";
+        errEl.style.display = "block";
+        return;
+      }
+    } else {
+      // Treat as SRT
+      var subs = parseSRT(text);
+      if (subs.length === 0) {
+        errEl.textContent = "Couldn't find any valid subtitle entries in that file.";
+        errEl.style.display = "block";
+        return;
+      }
+      state.subtitles = subs;
+      state.translations = {};
+      state.hasTranslations = false;
+      state.fileName = name;
+    }
+
+    if (!state.hasTranslations) state.bilingual = false;
+    openPlayer();
+  }
+
+  // ---------- Player open/reset ----------
+  function openPlayer() {
+    document.getElementById("loadScreen").style.display = "none";
+    document.getElementById("playerScreen").classList.add("active");
+    document.getElementById("fileLabel").textContent = state.fileName;
+    document.getElementById("bilingualSwitch").classList.toggle("on", state.bilingual);
+    if (!state.hasTranslations) {
+      document.getElementById("bilingualSwitch").style.opacity = "0.3";
+      document.getElementById("bilingualSwitch").disabled = true;
+    } else {
+      document.getElementById("bilingualSwitch").style.opacity = "1";
+      document.getElementById("bilingualSwitch").disabled = false;
+    }
+    resetClock();
+    applySettingsToUI();
+    render();
+  }
+
+  function resetClock() {
+    state.running = false;
+    state.offset = 0;
+    state.now = 0;
+    updatePlayPauseIcon();
+  }
+
+  // ---------- Timer ----------
+  var rafId = null;
+  function tick() {
+    if (state.running) {
+      var elapsed = (Date.now() - state.startTs) / 1000;
+      state.now = elapsed + state.offset;
+      render();
+      rafId = requestAnimationFrame(tick);
+    }
+  }
+  function togglePlay() {
+    if (state.running) {
+      state.offset = state.now;
+      state.running = false;
+    } else {
+      state.startTs = Date.now();
+      state.running = true;
+      rafId = requestAnimationFrame(tick);
+    }
+    updatePlayPauseIcon();
+  }
+  function updatePlayPauseIcon() {
+    document.getElementById("playIcon").style.display = state.running ? "none" : "block";
+    document.getElementById("pauseIcon").style.display = state.running ? "block" : "none";
+  }
+  function nudge(delta) {
+    if (state.running) {
+      state.offset = state.now + delta;
+      state.startTs = Date.now();
+    } else {
+      state.offset += delta;
+      state.now += delta;
+    }
+    render();
+  }
+  function syncTo(t) {
+    if (state.running) {
+      state.offset = t;
+      state.startTs = Date.now();
+    } else {
+      state.offset = t;
+      state.now = t;
+    }
+    render();
+  }
+
+  // ---------- Render ----------
+  function fmtTime(t) {
+    var s = Math.max(0, t);
+    var m = Math.floor(s / 60);
+    var sec = Math.floor(s % 60);
+    var ms = Math.floor((s - Math.floor(s)) * 10);
+    return m + ":" + String(sec).padStart(2, "0") + "." + ms;
+  }
+
+  function findIndex() {
+    var subs = state.subtitles;
+    for (var i = 0; i < subs.length; i++) {
+      if (state.now >= subs[i].start && state.now <= subs[i].end) return i;
+    }
+    for (var j = 0; j < subs.length; j++) {
+      if (subs[j].start > state.now) return j - 1;
+    }
+    return -1;
+  }
+
+  function lineText(i) {
+    if (i < 0 || i >= state.subtitles.length) return "";
+    if (state.bilingual) return state.subtitles[i].text;
+    var t = state.translations[i];
+    return (t !== undefined && t !== null && t !== "") ? t : state.subtitles[i].text;
+  }
+
+  function render() {
+    document.getElementById("clockLabel").textContent = "Clock: " + fmtTime(state.now) + " \u00B7 tap the current line to sync";
+
+    var idx = findIndex();
+    var prevIdx = idx - 1;
+    var nextIdx = (idx >= 0 && idx < state.subtitles.length - 1) ? idx + 1 : 0;
+
+    var prevEl = document.getElementById("prevLine");
+    var nextEl = document.getElementById("nextLine");
+    prevEl.textContent = prevIdx >= 0 ? lineText(prevIdx) : "";
+    nextEl.textContent = state.subtitles[nextIdx] ? lineText(nextIdx) : "";
+
+    var origEl = document.getElementById("curOrig");
+    var mainEl = document.getElementById("curMain");
+    var noCapEl = document.getElementById("noCaption");
+
+    if (idx >= 0 && state.subtitles[idx]) {
+      noCapEl.style.display = "none";
+      if (state.bilingual && state.hasTranslations) {
+        origEl.style.display = "block";
+        origEl.textContent = state.subtitles[idx].text;
+        mainEl.textContent = state.translations[idx] || state.subtitles[idx].text;
+      } else {
+        origEl.style.display = "none";
+        mainEl.textContent = lineText(idx);
+      }
+    } else {
+      noCapEl.style.display = "block";
+      origEl.textContent = "";
+      mainEl.textContent = "";
+    }
+
+    // sizes
+    var fs = state.fontSize;
+    mainEl.style.fontSize = fs + "px";
+    origEl.style.fontSize = (fs * 0.7) + "px";
+    prevEl.style.fontSize = (fs * 0.6) + "px";
+    nextEl.style.fontSize = (fs * 0.6) + "px";
+    mainEl.style.color = state.textColor;
+    origEl.style.color = state.textColor;
+    prevEl.style.color = state.textColor;
+    nextEl.style.color = state.textColor;
+  }
+
+  function applySettingsToUI() {
+    document.getElementById("dimOverlay").style.opacity = state.dim / 100;
+    document.getElementById("dimLabel").textContent = "Dim overlay: " + state.dim + "%";
+    document.getElementById("sizeLabel").textContent = "Text size: " + state.fontSize + "px";
+    document.getElementById("bilingualSwitch").classList.toggle("on", state.bilingual);
+
+    var swatches = document.querySelectorAll(".swatch");
+    swatches.forEach(function (sw) {
+      sw.classList.toggle("active", sw.dataset.color === state.textColor);
+    });
+
+    var segBtns = document.querySelectorAll(".segBtn");
+    segBtns.forEach(function (b) { b.classList.toggle("active", b.dataset.layout === state.layout); });
+
+    var app = document.getElementById("app");
+    app.classList.remove("layout-auto", "layout-portrait", "layout-landscape", "force-landscape");
+    if (state.layout === "auto") {
+      app.classList.add("layout-auto");
+    } else if (state.layout === "portrait") {
+      app.classList.add("layout-portrait");
+    } else if (state.layout === "landscape") {
+      app.classList.add("layout-landscape", "force-landscape");
+    }
+  }
+
+  // ---------- Fullscreen ----------
+  function toggleFullscreen() {
+    var el = document.documentElement;
+    if (!document.fullscreenElement) {
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(function () { showFullscreenHint(); });
+      } else {
+        showFullscreenHint();
+      }
+    } else {
+      if (document.exitFullscreen) document.exitFullscreen();
+    }
+  }
+  function showFullscreenHint() {
+    alert("Full-screen isn't available in this browser view. For the cleanest full-screen experience on iPhone, open this page in Safari, tap Share, then \"Add to Home Screen\" \u2014 that removes the browser bar entirely.");
+  }
+
+  // ---------- Wire up UI ----------
+  function init() {
+    loadSettings();
+
+    // color swatches
+    var swatchWrap = document.getElementById("colorSwatches");
+    COLORS.forEach(function (c) {
+      var sw = document.createElement("button");
+      sw.className = "swatch";
+      sw.style.background = c;
+      sw.dataset.color = c;
+      sw.addEventListener("click", function () {
+        state.textColor = c;
+        applySettingsToUI();
+        render();
+        saveSettings();
+      });
+      swatchWrap.appendChild(sw);
+    });
+
+    document.getElementById("chooseFileBtn").addEventListener("click", function () {
+      document.getElementById("fileInput").click();
+    });
+    document.getElementById("fileInput").addEventListener("change", function (e) {
+      var file = e.target.files && e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function (ev) { loadFileContent(String(ev.target.result), file.name); };
+      reader.onerror = function () {
+        var errEl = document.getElementById("loadError");
+        errEl.textContent = "Couldn't read that file. Try again.";
+        errEl.style.display = "block";
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById("backBtn").addEventListener("click", function () {
+      document.getElementById("playerScreen").classList.remove("active");
+      document.getElementById("loadScreen").style.display = "flex";
+    });
+    document.getElementById("newFileBtn").addEventListener("click", function () {
+      document.getElementById("playerScreen").classList.remove("active");
+      document.getElementById("loadScreen").style.display = "flex";
+    });
+
+    document.getElementById("settingsBtn").addEventListener("click", function () {
+      document.getElementById("settingsPanel").classList.toggle("open");
+    });
+    document.getElementById("fullscreenBtn").addEventListener("click", toggleFullscreen);
+
+    document.getElementById("dimSlider").addEventListener("input", function (e) {
+      state.dim = Number(e.target.value);
+      applySettingsToUI();
+      saveSettings();
+    });
+    document.getElementById("sizeSlider").addEventListener("input", function (e) {
+      state.fontSize = Number(e.target.value);
+      applySettingsToUI();
+      render();
+      saveSettings();
+    });
+    document.getElementById("bilingualSwitch").addEventListener("click", function () {
+      if (!state.hasTranslations) return;
+      state.bilingual = !state.bilingual;
+      applySettingsToUI();
+      render();
+      saveSettings();
+    });
+    document.querySelectorAll(".segBtn").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.layout = b.dataset.layout;
+        applySettingsToUI();
+        saveSettings();
+      });
+    });
+
+    document.getElementById("currentWrap").addEventListener("click", function () {
+      var idx = findIndex();
+      if (idx >= 0 && state.subtitles[idx]) syncTo(state.subtitles[idx].start);
+    });
+
+    document.getElementById("playBtn").addEventListener("click", togglePlay);
+    document.getElementById("back10").addEventListener("click", function () { nudge(-10); });
+    document.getElementById("back1").addEventListener("click", function () { nudge(-1); });
+    document.getElementById("fwd1").addEventListener("click", function () { nudge(1); });
+    document.getElementById("fwd10").addEventListener("click", function () { nudge(10); });
+    document.getElementById("resetBtn").addEventListener("click", resetClock);
+
+    document.getElementById("sizeSlider").value = state.fontSize;
+    document.getElementById("dimSlider").value = state.dim;
+    applySettingsToUI();
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+
+  // Register the service worker so the app works fully offline after first load.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("service-worker.js").catch(function () {
+        // Offline caching just won't be available this session — the app still
+        // works normally as long as the page itself can load.
+      });
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
