@@ -1,5 +1,5 @@
 // Caches the whole app on first load so every visit after that is 100% offline.
-var CACHE_NAME = "subtitle-player-v3";
+var CACHE_NAME = "subtitle-player-v4";
 var ASSETS = [
   "./",
   "./index.html",

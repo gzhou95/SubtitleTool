@@ -110,19 +110,16 @@
     z-index: 30;
   }
 
-  /* Idle mode: only the current caption stays visible. Everything else fades out but keeps its
-     space, so the caption never shifts position when the controls come and go. */
-  #topBar, #settingsPanel, #clockLabel, #controls, #bottomRow, #prevLine, #nextLine, #noCaption {
+  /* Idle mode: captions (previous, current, next) stay visible. Only the UI chrome fades out but
+     keeps its space, so the captions never shift when the controls come and go. */
+  #topBar, #settingsPanel, #clockLabel, #controls, #bottomRow {
     transition: opacity 0.35s ease;
   }
   #playerScreen.idle #topBar,
   #playerScreen.idle #settingsPanel,
   #playerScreen.idle #clockLabel,
   #playerScreen.idle #controls,
-  #playerScreen.idle #bottomRow,
-  #playerScreen.idle #prevLine,
-  #playerScreen.idle #nextLine,
-  #playerScreen.idle #noCaption {
+  #playerScreen.idle #bottomRow {
     opacity: 0;
     pointer-events: none;
   }
